@@ -22,6 +22,7 @@ import beast.core.Description;
 import beast.core.Input;
 import beast.core.StateNode;
 import beast.core.StateNodeInitialiser;
+import beast.math.distributions.ParametricDistribution;
 import beast.util.TreeParser;
 import com.google.common.collect.Lists;
 import java.io.PrintStream;
@@ -57,6 +58,21 @@ public class MultiTypeTree extends Tree {
             "typeSet", "Type set input."
     );
 
+    final public Input<Double> rootHeightInput = new Input<>("rootHeight", "If specified the tree will be scaled to match the root height, if constraints allow this");
+
+    // hard bound for the set, if any
+    List<RandomTree.Bound> m_bounds;
+
+    // list of parametric distribution constraining the MRCA of taxon sets, null if not present
+    List<ParametricDistribution> distributions;
+
+    // total nr of taxa
+    int nrOfTaxa;
+
+    // taxon sets of clades that has a constraint of calibrations. Monophyletic constraints may be nested, and are sorted by the code to be at a
+    // higher index, i.e iterating from zero up does post-order (descendants before parent).
+    List<Set<String>> taxonSets;
+
     /*
      * Non-input fields:
      */
@@ -85,7 +101,11 @@ public class MultiTypeTree extends Tree {
                 throw new IllegalArgumentException("Attempted to initialise "
                         + "multi-type tree with regular tree object.");
             }
-            
+
+            if (rootHeightInput.get() != null) {
+                scaleToFit(rootHeightInput.get() / root.getHeight(), root);
+            }  /*is this the correct location for this? I put it here because the initial tree is mentioned above */
+
             MultiTypeTree other = (MultiTypeTree)m_initial.get();
             root = other.root.copy();
             nodeCount = other.nodeCount;
@@ -135,7 +155,8 @@ public class MultiTypeTree extends Tree {
         if (nodeCount >= 0) {
             initArrays();
         }
-        
+
+
         typeLabel = typeLabelInput.get();
         typeSet = typeSetInput.get();
         
@@ -144,6 +165,67 @@ public class MultiTypeTree extends Tree {
         // Ensure tree is compatible with traits.
         if (hasDateTrait())
             adjustTreeNodeHeights(root);
+    }
+
+    private void scaleToFit(double scale, Node node) {
+        if (!node.isLeaf()) {
+            double oldHeight = node.getHeight();
+            node.height *= scale;
+            final Integer constraint = getDistrConstraint(node);
+            if (constraint != null) {
+                if (node.height < m_bounds.get(constraint).lower || node.height > m_bounds.get(constraint).upper) {
+                    //revert scaling
+                    node.height = oldHeight;
+                    return;
+                }
+            }
+            scaleToFit(scale, node.getLeft());
+            scaleToFit(scale, node.getRight());
+            if (node.height < Math.max(node.getLeft().getHeight(), node.getRight().getHeight())) {
+                // this can happen if a child node is constrained and the default tree is higher than desired
+                node.height = 1.0000001 * Math.max(node.getLeft().getHeight(), node.getRight().getHeight());
+            }
+        }
+    }
+
+    private Integer getDistrConstraint(final Node node) {
+        for (int i = 0; i < distributions.size(); i++) {
+            if (distributions.get(i) != null) {
+                final Set<String> taxonSet = taxonSets.get(i);
+                if (traverse(node, taxonSet, taxonSet.size(), new int[1]) == nrOfTaxa + 127) {
+                    return i;
+                }
+            }
+        }
+        return null;
+    }
+
+    int traverse(final Node node, final Set<String> MRCATaxonSet, final int nrOfMRCATaxa, final int[] taxonCount) {
+        if (node.isLeaf()) {
+            taxonCount[0]++;
+            if (MRCATaxonSet.contains(node.getID())) {
+                return 1;
+            } else {
+                return 0;
+            }
+        } else {
+            int taxons = traverse(node.getLeft(), MRCATaxonSet, nrOfMRCATaxa, taxonCount);
+            final int leftTaxa = taxonCount[0];
+            taxonCount[0] = 0;
+            if (node.getRight() != null) {
+                taxons += traverse(node.getRight(), MRCATaxonSet, nrOfMRCATaxa, taxonCount);
+                final int rightTaxa = taxonCount[0];
+                taxonCount[0] = leftTaxa + rightTaxa;
+            }
+            if (taxons == nrOfTaxa + 127) {
+                taxons++;
+            }
+            if (taxons == nrOfMRCATaxa) {
+                // we are at the MRCA, return magic nr
+                return nrOfTaxa + 127;
+            }
+            return taxons;
+        }
     }
 
     @Override
